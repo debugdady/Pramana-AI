@@ -1,11 +1,3 @@
-// 🔥 IMPORTANT FIXES APPLIED:
-// - expo-clipboard instead of deprecated Clipboard
-// - context menu closes correctly
-// - selectedMessage resets properly
-// - edit flow fixed (prefill input)
-// - regenerate logic cleaned
-// - no stale state bugs
-
 import {
   View,
   ScrollView,
@@ -18,9 +10,8 @@ import {
   Pressable,
 } from 'react-native';
 
-import * as Clipboard from 'expo-clipboard'; // ✅ FIX
-
-import { useLocalSearchParams, router } from 'expo-router';
+import * as Clipboard from 'expo-clipboard';
+import { useLocalSearchParams } from 'expo-router';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Icon } from '@/components/ui/icon';
@@ -37,7 +28,7 @@ import {
 
 import Markdown from 'react-native-markdown-display';
 import { useChatStore } from '@/src/store/chatStore';
-import { chatCompletion, type ChatMessage } from '@/src/services/api';
+import { chatCompletion, streamChat, type ChatMessage } from '@/src/services/api';
 import type { Message } from '@/src/store/chatStore';
 import { createMarkdownStyles } from '@/src/utils/markdownStyles';
 import { Linking } from 'react-native';
@@ -48,267 +39,201 @@ export default function ChatScreen() {
   const { ChatId } = useLocalSearchParams<{ ChatId: string }>();
 
   const [input, setInput] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
+  const [status, setStatus] = useState<'idle' | 'thinking' | 'streaming'>('idle');
   const [error, setError] = useState<string | null>(null);
-
   const [selectedMessage, setSelectedMessage] = useState<string | null>(null);
-  const [menuVisible, setMenuVisible] = useState(false);
-
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null);
+
+  const abortRef = useRef<AbortController | null>(null);
+  const scrollViewRef = useRef<ScrollView>(null);
 
   const sessions = useChatStore((s) => s.sessions);
   const addMessage = useChatStore((s) => s.addMessage);
   const deleteMessage = useChatStore((s) => s.deleteMessage);
   const updateMessage = useChatStore((s) => s.updateMessage);
-  const regenerateMessage = useChatStore((s) => s.regenerateMessage);
-
-  const scrollViewRef = useRef<ScrollView>(null);
 
   const session = useMemo(
     () => sessions.find((s) => s.id === ChatId),
     [sessions, ChatId]
   );
 
+  const isBusy = status !== 'idle';
+
   useEffect(() => {
     setTimeout(() => {
       scrollViewRef.current?.scrollToEnd({ animated: true });
     }, 80);
-  }, [session?.messages.length, isLoading]);
+  }, [session?.messages.length, status]);
 
   if (!session) return null;
 
-  // =========================
-  // 🧠 SEND / EDIT LOGIC
-  // =========================
-  const handleSendMessage = async () => {
-    const trimmed = input.trim();
-    if (!trimmed || isLoading) return;
+  const appendToken = (id: string, token: string) => {
+    // Get the latest session from store to avoid stale closure
+    const currentSession = useChatStore.getState().sessions.find((s) => s.id === ChatId);
+    if (!currentSession) return;
+    const msg = currentSession.messages.find((m) => m.id === id);
+    if (!msg) return;
+    updateMessage(ChatId, id, msg.content + token);
+  };
 
-    setIsLoading(true);
-    setError(null);
+  const runStreaming = async (messages: ChatMessage[], assistantId: string) => {
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    setStreamingMessageId(assistantId);
+    setStatus('thinking');
+
+    let first = true;
 
     try {
-      // ✏️ EDIT MODE
-      if (editingMessageId) {
-        const index = session.messages.findIndex(
-          (m) => m.id === editingMessageId
-        );
+      await streamChat(
+        messages,
+        (token) => {
+          if (controller.signal.aborted) return;
 
-        updateMessage(ChatId, editingMessageId, trimmed);
+          if (first) {
+            setStatus('streaming');
+            first = false;
+          }
 
-        const messages = session.messages.slice(0, index + 1).map((m) => ({
-          role: m.id === editingMessageId ? 'user' : m.role,
-          content: m.id === editingMessageId ? trimmed : m.content,
-        }));
-
-        const res = await chatCompletion(messages);
-
-        addMessage(ChatId, {
-          id: Date.now().toString(),
-          role: 'assistant',
-          content: res,
-          createdAt: Date.now(),
-        });
-
-        setEditingMessageId(null);
-      } else {
-        // 🧾 NORMAL SEND
-        const userMsg: Message = {
-          id: Date.now().toString(),
-          role: 'user',
-          content: trimmed,
-          createdAt: Date.now(),
-        };
-
-        addMessage(ChatId, userMsg);
-
-        const apiMessages: ChatMessage[] = [
-          ...session.messages.map((m) => ({
-            role: m.role,
-            content: m.content,
-          })),
-          { role: 'user', content: trimmed },
-        ];
-
-        const res = await chatCompletion(apiMessages);
-
-        addMessage(ChatId, {
-          id: (Date.now() + 1).toString(),
-          role: 'assistant',
-          content: res,
-          createdAt: Date.now() + 1,
-        });
+          appendToken(assistantId, token);
+        },
+        controller.signal
+      );
+      
+      setStatus('idle');
+    } catch (err: any) {
+      if (err.name !== 'AbortError') {
+        setError('Streaming failed');
+        console.error('Streaming error:', err);
       }
-
-      setInput('');
-    } catch {
-      setError('Failed to get response');
     } finally {
-      setIsLoading(false);
+      if (abortRef.current === controller) {
+        abortRef.current = null;
+      }
+      setStatus('idle');
+      setStreamingMessageId(null);
     }
   };
 
-  // =========================
-  // 📋 ACTIONS
-  // =========================
-  const handleCopy = async (id: string) => {
-    const msg = session.messages.find((m) => m.id === id);
-    if (!msg) return;
-
-    await Clipboard.setStringAsync(msg.content);
-    Alert.alert('Copied');
-    setSelectedMessage(null);
+  const handleStop = () => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setStatus('idle');
+    setStreamingMessageId(null);
   };
 
-  const handleRegenerate = async (id: string) => {
-    const index = session.messages.findIndex((m) => m.id === id);
-    if (index === -1) return;
+  const handleSendMessage = async () => {
+    if (!input.trim() || isBusy) return;
 
-    regenerateMessage(ChatId, id);
+    const text = input.trim();
+    setInput('');
 
-    const messages = session.messages.slice(0, index).map((m) => ({
+    const userMsg: Message = {
+      id: Date.now().toString(),
+      role: 'user',
+      content: text,
+      createdAt: Date.now(),
+    };
+
+    addMessage(ChatId, userMsg);
+
+    const assistantId = `${Date.now()}-a`;
+
+    addMessage(ChatId, {
+      id: assistantId,
+      role: 'assistant',
+      content: '',
+      createdAt: Date.now(),
+    });
+
+    // Get the latest session from store (includes both user and assistant messages)
+    const currentSession = useChatStore.getState().sessions.find((s) => s.id === ChatId);
+    if (!currentSession) return;
+
+    const history: ChatMessage[] = currentSession.messages.map((m) => ({
       role: m.role,
       content: m.content,
     }));
 
-    setIsLoading(true);
-
-    try {
-      const res = await chatCompletion(messages);
-
-      addMessage(ChatId, {
-        id: Date.now().toString(),
-        role: 'assistant',
-        content: res,
-        createdAt: Date.now(),
-      });
-    } finally {
-      setIsLoading(false);
-      setSelectedMessage(null);
-    }
+    runStreaming(history, assistantId);
   };
 
-  const handleEdit = (id: string) => {
+  const handleCopy = async (id: string) => {
     const msg = session.messages.find((m) => m.id === id);
     if (!msg) return;
-
-    setEditingMessageId(id);
-    setInput(msg.content);
-    setSelectedMessage(null);
+    await Clipboard.setStringAsync(msg.content);
   };
 
-  const handleDelete = (id: string) => {
-    Alert.alert('Delete?', '', [
-      { text: 'Cancel' },
-      {
-        text: 'Delete',
-        style: 'destructive',
-        onPress: () => deleteMessage(ChatId, id),
-      },
-    ]);
-  };
-
-  const handleShare = async (id: string) => {
-    const msg = session.messages.find((m) => m.id === id);
-    if (!msg) return;
-
-    await Share.share({ message: msg.content });
-  };
-
-  // =========================
-  // UI
-  // =========================
   return (
-  <KeyboardAvoidingView style={{ flex: 1, backgroundColor: '#fff' }}>
-    <Pressable style={{ flex: 1 }} onPress={() => setSelectedMessage(null)}>
-      <ScrollView ref={scrollViewRef}>
-        {session.messages.map((m) => (
-          <Pressable
-            key={m.id}
-            onLongPress={() => setSelectedMessage(m.id)}
-            style={{ padding: 16 }}
-          >
-            {m.role === 'assistant' ? (
-              <Markdown
-                style={{
-                  ...createMarkdownStyles(),
-                  link: {
-                    color: '#3b82f6',
-                    textDecorationLine: 'underline',
-                  },
-                }}
-                onLinkPress={(url) => {
-                  Linking.openURL(url).catch(() => {
-                    console.warn('Cannot open link:', url);
-                  });
-                }}
-              >
-                {m.content}
-              </Markdown>
-            ) : (
-              <View
-                style={{
-                  alignSelf: 'flex-end',
-                  backgroundColor: '#eee',
-                  padding: 12,
-                  borderRadius: 16,
-                }}
-              >
-                <Text>{m.content}</Text>
-              </View>
-            )}
+    <KeyboardAvoidingView
+      style={{ flex: 1 }}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? 80 : 0}
+    >
+      <Pressable style={{ flex: 1 }} onPress={() => setSelectedMessage(null)}>
+        <ScrollView
+          ref={scrollViewRef}
+          keyboardDismissMode="on-drag"
+          keyboardShouldPersistTaps="handled"
+        >
+          {session.messages.map((m) => {
+            const isStreaming =
+              m.id === streamingMessageId && status !== 'idle';
 
-            {/* 🔥 ACTION BAR */}
-            {selectedMessage === m.id && (
-              <View
-                style={{
-                  flexDirection: 'row',
-                  gap: 10,
-                  marginTop: 8,
-                }}
-              >
-                <Icon as={CopyIcon} onPress={() => handleCopy(m.id)} />
+            return (
+              <View key={m.id} style={{ padding: 16 }}>
                 {m.role === 'assistant' ? (
-                  <Icon
-                    as={RotateCwIcon}
-                    onPress={() => handleRegenerate(m.id)}
-                  />
+                  <Markdown
+                    key={m.id}
+                    style={createMarkdownStyles()}
+                    onLinkPress={(url) => Linking.openURL(url)}
+                  >
+                    {m.content || ' '}
+                  </Markdown>
                 ) : (
-                  <Icon as={EditIcon} onPress={() => handleEdit(m.id)} />
+                  <View
+                    style={{
+                      alignSelf: 'flex-end',
+                      backgroundColor: '#eee',
+                      padding: 12,
+                      borderRadius: 16,
+                    }}
+                  >
+                    <Text>{m.content}</Text>
+                  </View>
                 )}
-                <Icon as={ShareIcon} onPress={() => handleShare(m.id)} />
-                <Icon as={TrashIcon} onPress={() => handleDelete(m.id)} />
-                <Icon as={FlagIcon} onPress={() => setSelectedMessage(null)} />
+
+                {isStreaming && m.content.length === 0 && (
+                  <View style={{ flexDirection: 'row', marginTop: 6 }}>
+                    <ActivityIndicator size="small" />
+                    <Text style={{ marginLeft: 6 }}>Thinking...</Text>
+                  </View>
+                )}
               </View>
-            )}
-          </Pressable>
-        ))}
+            );
+          })}
+        </ScrollView>
 
-        {isLoading && (
-          <Text style={{ textAlign: 'center', padding: 20 }}>
-            Thinking...
-          </Text>
-        )}
-      </ScrollView>
+        {/* INPUT */}
+        <View style={{ padding: 12 }}>
+          <TextInput
+            value={input}
+            onChangeText={setInput}
+            multiline
+            style={{
+              backgroundColor: '#f5f5f5',
+              borderRadius: 20,
+              padding: 12,
+            }}
+          />
 
-      {/* INPUT */}
-      <View style={{ padding: 12 }}>
-        <TextInput
-          value={input}
-          onChangeText={setInput}
-          multiline
-          style={{
-            backgroundColor: '#f5f5f5',
-            borderRadius: 20,
-            padding: 12,
-          }}
-        />
-
-        <Button onPress={handleSendMessage}>
-          <Icon as={SendIcon} />
-        </Button>
-      </View>
-    </Pressable>
-  </KeyboardAvoidingView>
+          <Button onPress={isBusy ? handleStop : handleSendMessage}>
+            {isBusy ? <Text>Stop</Text> : <Icon as={SendIcon} />}
+          </Button>
+        </View>
+      </Pressable>
+    </KeyboardAvoidingView>
   );
 }

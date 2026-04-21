@@ -1,4 +1,7 @@
-const BASE_URL = 'http://192.168.1.3:1234/v1';
+import { fetch as expoFetch } from 'expo/fetch';
+
+const BASE_URL = 'http://192.168.1.3:1234/v1'; // Android emulator. Use your LAN IP on a physical device.
+const MODEL = 'local-model'; // Replace with the exact LM Studio model id if needed.
 
 type Role = 'system' | 'user' | 'assistant';
 
@@ -17,14 +20,8 @@ type ChatResponse = {
   }[];
 };
 
-/**
- * Generic request wrapper
- */
-async function request<T>(
-  endpoint: string,
-  options: RequestInit
-): Promise<T> {
-  const res = await fetch(`${BASE_URL}${endpoint}`, {
+async function request<T>(endpoint: string, options: RequestInit): Promise<T> {
+  const res = await expoFetch(`${BASE_URL}${endpoint}`, {
     headers: {
       'Content-Type': 'application/json',
     },
@@ -36,21 +33,86 @@ async function request<T>(
     throw new Error(`API Error: ${res.status} - ${text}`);
   }
 
-  return res.json();
+  return res.json() as Promise<T>;
 }
 
-/**
- * Chat completion (non-streaming)
- */
 export async function chatCompletion(messages: ChatMessage[]) {
   const data = await request<ChatResponse>('/chat/completions', {
     method: 'POST',
     body: JSON.stringify({
-      model: 'local-model', // LM Studio ignores or auto-selects
+      model: MODEL,
       messages,
       temperature: 0.7,
     }),
   });
 
   return data.choices[0]?.message?.content ?? '';
+}
+
+export async function streamChat(
+  messages: ChatMessage[],
+  onToken: (token: string) => void,
+  signal?: AbortSignal
+) {
+  const res = await expoFetch(`${BASE_URL}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: MODEL,
+      messages,
+      temperature: 0.7,
+      stream: true,
+    }),
+    signal,
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Stream API Error: ${res.status} - ${text}`);
+  }
+
+  if (!res.body) {
+    throw new Error('No stream body returned by the server');
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+
+  let buffer = '';
+
+  while (true) {
+    if (signal?.aborted) {
+      reader.cancel();
+      throw new DOMException('Aborted', 'AbortError');
+    }
+
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() ?? '';
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('data:')) continue;
+
+      const payload = trimmed.slice(5).trim();
+      if (!payload || payload === '[DONE]') return;
+
+      try {
+        const parsed = JSON.parse(payload);
+        const token = parsed.choices?.[0]?.delta?.content;
+
+        if (token) {
+          onToken(token);
+        }
+      } catch {
+        // Ignore partial or malformed chunks.
+      }
+    }
+  }
 }
