@@ -1,7 +1,7 @@
 import { fetch as expoFetch } from 'expo/fetch';
 
-const BASE_URL = 'http://192.168.1.3:1234/v1'; // Android emulator. Use your LAN IP on a physical device.
-const MODEL = 'local-model'; // Replace with the exact LM Studio model id if needed.
+const BASE_URL = 'http://192.168.1.3:1234/v1';
+const MODEL = 'local-model';
 
 type Role = 'system' | 'user' | 'assistant';
 
@@ -82,37 +82,41 @@ export async function streamChat(
 
   let buffer = '';
 
-  while (true) {
-    if (signal?.aborted) {
-      reader.cancel();
-      throw new DOMException('Aborted', 'AbortError');
-    }
+  try {
+    while (true) {
+      // ✅ Check abort BEFORE reading, and just return instead of throwing DOMException
+      if (signal?.aborted) {
+        break;
+      }
 
-    const { done, value } = await reader.read();
-    if (done) break;
+      const { done, value } = await reader.read();
+      if (done) break;
 
-    buffer += decoder.decode(value, { stream: true });
+      buffer += decoder.decode(value, { stream: true });
 
-    const lines = buffer.split(/\r?\n/);
-    buffer = lines.pop() ?? '';
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() ?? '';
 
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith('data:')) continue;
+      for (const line of lines) {
+        if (signal?.aborted) break; // ✅ Also bail mid-chunk if aborted
 
-      const payload = trimmed.slice(5).trim();
-      if (!payload || payload === '[DONE]') return;
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('data:')) continue;
 
-      try {
-        const parsed = JSON.parse(payload);
-        const token = parsed.choices?.[0]?.delta?.content;
+        const payload = trimmed.slice(5).trim();
+        if (!payload || payload === '[DONE]') return;
 
-        if (token) {
-          onToken(token);
+        try {
+          const parsed = JSON.parse(payload);
+          const token = parsed.choices?.[0]?.delta?.content;
+          if (token) onToken(token);
+        } catch {
+          // Ignore partial or malformed chunks
         }
-      } catch {
-        // Ignore partial or malformed chunks.
       }
     }
+  } finally {
+    // ✅ Always cancel the reader safely in finally — never throw after cancel
+    reader.cancel().catch(() => {});
   }
 }

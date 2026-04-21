@@ -5,8 +5,6 @@ import {
   KeyboardAvoidingView,
   Platform,
   ActivityIndicator,
-  Share,
-  Alert,
   Pressable,
 } from 'react-native';
 
@@ -28,7 +26,7 @@ import {
 
 import Markdown from 'react-native-markdown-display';
 import { useChatStore } from '@/src/store/chatStore';
-import { chatCompletion, streamChat, type ChatMessage } from '@/src/services/api';
+import { streamChat, type ChatMessage } from '@/src/services/api';
 import type { Message } from '@/src/store/chatStore';
 import { createMarkdownStyles } from '@/src/utils/markdownStyles';
 import { Linking } from 'react-native';
@@ -36,7 +34,7 @@ import { Linking } from 'react-native';
 const MAX_CHAT_WIDTH = 720;
 
 export default function ChatScreen() {
-  const { ChatId } = useLocalSearchParams<{ ChatId: string }>();
+  const { ChatId, autoSend } = useLocalSearchParams<{ ChatId: string; autoSend?: string }>();
 
   const [input, setInput] = useState('');
   const [status, setStatus] = useState<'idle' | 'thinking' | 'streaming'>('idle');
@@ -47,6 +45,8 @@ export default function ChatScreen() {
 
   const abortRef = useRef<AbortController | null>(null);
   const scrollViewRef = useRef<ScrollView>(null);
+  // ✅ Prevents autoSend from firing more than once even if session changes
+  const autoSendFiredRef = useRef(false);
 
   const sessions = useChatStore((s) => s.sessions);
   const addMessage = useChatStore((s) => s.addMessage);
@@ -66,10 +66,7 @@ export default function ChatScreen() {
     }, 80);
   }, [session?.messages.length, status]);
 
-  if (!session) return null;
-
   const appendToken = (id: string, token: string) => {
-    // Get the latest session from store to avoid stale closure
     const currentSession = useChatStore.getState().sessions.find((s) => s.id === ChatId);
     if (!currentSession) return;
     const msg = currentSession.messages.find((m) => m.id === id);
@@ -77,6 +74,7 @@ export default function ChatScreen() {
     updateMessage(ChatId, id, msg.content + token);
   };
 
+  // ✅ Defined ABOVE the if (!session) guard so it's always in scope for the autoSend effect
   const runStreaming = async (messages: ChatMessage[], assistantId: string) => {
     const controller = new AbortController();
     abortRef.current = controller;
@@ -91,20 +89,16 @@ export default function ChatScreen() {
         messages,
         (token) => {
           if (controller.signal.aborted) return;
-
           if (first) {
             setStatus('streaming');
             first = false;
           }
-
           appendToken(assistantId, token);
         },
         controller.signal
       );
-      
-      setStatus('idle');
     } catch (err: any) {
-      if (err.name !== 'AbortError') {
+      if (!controller.signal.aborted) {
         setError('Streaming failed');
         console.error('Streaming error:', err);
       }
@@ -117,11 +111,36 @@ export default function ChatScreen() {
     }
   };
 
+  // ✅ session in deps so effect retries if session wasn't ready on first render
+  useEffect(() => {
+    if (autoSend !== '1' || !session || autoSendFiredRef.current) return;
+
+    const lastMsg = session.messages[session.messages.length - 1];
+    if (!lastMsg || lastMsg.role !== 'user') return;
+
+    autoSendFiredRef.current = true; // ✅ mark fired before async work starts
+
+    const assistantId = `${Date.now()}-a`;
+
+    addMessage(ChatId, {
+      id: assistantId,
+      role: 'assistant',
+      content: '',
+      createdAt: Date.now(),
+    });
+
+    const history: ChatMessage[] = session.messages.map((m) => ({
+      role: m.role,
+      content: m.content,
+    }));
+
+    setTimeout(() => runStreaming(history, assistantId), 0);
+  }, [autoSend, session]); // ✅ re-runs when session becomes available
+
+  if (!session) return null;
+
   const handleStop = () => {
     abortRef.current?.abort();
-    abortRef.current = null;
-    setStatus('idle');
-    setStreamingMessageId(null);
   };
 
   const handleSendMessage = async () => {
@@ -129,6 +148,17 @@ export default function ChatScreen() {
 
     const text = input.trim();
     setInput('');
+
+    const currentSession = useChatStore.getState().sessions.find((s) => s.id === ChatId);
+    if (!currentSession) return;
+
+    const history: ChatMessage[] = [
+      ...currentSession.messages.map((m) => ({
+        role: m.role,
+        content: m.content,
+      })),
+      { role: 'user' as const, content: text },
+    ];
 
     const userMsg: Message = {
       id: Date.now().toString(),
@@ -148,15 +178,6 @@ export default function ChatScreen() {
       createdAt: Date.now(),
     });
 
-    // Get the latest session from store (includes both user and assistant messages)
-    const currentSession = useChatStore.getState().sessions.find((s) => s.id === ChatId);
-    if (!currentSession) return;
-
-    const history: ChatMessage[] = currentSession.messages.map((m) => ({
-      role: m.role,
-      content: m.content,
-    }));
-
     runStreaming(history, assistantId);
   };
 
@@ -167,14 +188,18 @@ export default function ChatScreen() {
   };
 
   return (
+    // ✅ behavior="padding" is reliable on both iOS and Android
     <KeyboardAvoidingView
       style={{ flex: 1 }}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      keyboardVerticalOffset={Platform.OS === 'ios' ? 80 : 0}
+      behavior="padding"
+      keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 70}
     >
       <Pressable style={{ flex: 1 }} onPress={() => setSelectedMessage(null)}>
+        {/* ✅ flex:1 + flexGrow:1 ensures ScrollView fills space and never hides behind keyboard */}
         <ScrollView
           ref={scrollViewRef}
+          style={{ flex: 1 }}
+          contentContainerStyle={{ flexGrow: 1, paddingBottom: 8 }}
           keyboardDismissMode="on-drag"
           keyboardShouldPersistTaps="handled"
         >
@@ -207,7 +232,7 @@ export default function ChatScreen() {
 
                 {isStreaming && m.content.length === 0 && (
                   <View style={{ flexDirection: 'row', marginTop: 6 }}>
-                    <ActivityIndicator size="small" />
+                    <ActivityIndicator size="small" color="#000000" />
                     <Text style={{ marginLeft: 6 }}>Thinking...</Text>
                   </View>
                 )}
