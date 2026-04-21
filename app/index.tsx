@@ -3,11 +3,13 @@ import { Icon } from '@/components/ui/icon';
 import { Text } from '@/components/ui/text';
 import { UserMenu } from '@/components/user-menu';
 import { useUser } from '@clerk/clerk-expo';
+import { useNavigation } from '@react-navigation/native';
 import { Link, Stack } from 'expo-router';
-import { MoonStarIcon, XIcon, SunIcon } from 'lucide-react-native';
+import { MoonStarIcon, XIcon, SunIcon, MenuIcon } from 'lucide-react-native';
 import { useColorScheme } from 'nativewind';
 import * as React from 'react';
 import { Image, type ImageStyle, View } from 'react-native';
+
 
 const LOGO = {
   light: require('@/assets/images/react-native-reusables-light.png'),
@@ -27,8 +29,12 @@ const LOGO_STYLE: ImageStyle = {
 const SCREEN_OPTIONS = {
   header: () => (
     <View className="top-safe absolute left-0 right-0 flex-row justify-between px-4 py-2 web:mx-2">
-      <ThemeToggle />
-      <UserMenu />
+      <DrawerToggle />
+      <Text className=''>Pramana AI</Text>
+      <View className="flex-row gap-2">
+        <ThemeToggle />
+        <UserMenu />
+      </View>
     </View>
   ),
 };
@@ -74,6 +80,16 @@ const THEME_ICONS = {
   light: SunIcon,
   dark: MoonStarIcon,
 };
+
+function DrawerToggle() {
+  const navigation = useNavigation();
+
+  return (
+    <Button onPress={() => navigation.toggleDrawer()} size="icon" variant="ghost" className="rounded-full">
+      <Icon as={MenuIcon} className="size-6" />
+    </Button>
+  );
+}
 
 function ThemeToggle() {
   const { colorScheme, toggleColorScheme } = useColorScheme();
