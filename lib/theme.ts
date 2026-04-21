@@ -1,5 +1,29 @@
 import { DarkTheme, DefaultTheme, type Theme } from '@react-navigation/native';
 
+// 🎨 Font Family System
+export const FONTS = {
+  regular: 'DMSans-Regular',
+  medium: 'DMSans-Medium',
+  semibold: 'DMSans-SemiBold',
+  italic: 'DMSans-Italic',
+};
+
+// Font requirements for different text variants
+export const FONT_VARIANTS: Record<string, keyof typeof FONTS> = {
+  default: 'regular',
+  p: 'regular',
+  lead: 'regular',
+  muted: 'regular',
+  code: 'medium',
+  h1: 'semibold',
+  h2: 'semibold',
+  h3: 'semibold',
+  h4: 'semibold',
+  large: 'semibold',
+  small: 'medium',
+  blockquote: 'italic',
+};
+
 export const THEME = {
   light: {
     background: 'hsl(0 0% 100%)',

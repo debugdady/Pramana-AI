@@ -9,7 +9,12 @@ import { MoonStarIcon, XIcon, SunIcon, MenuIcon } from 'lucide-react-native';
 import { useColorScheme } from 'nativewind';
 import * as React from 'react';
 import { Image, type ImageStyle, View } from 'react-native';
-
+import {
+  SafeAreaView,
+  SafeAreaProvider,
+  SafeAreaInsetsContext,
+  useSafeAreaInsets,
+} from 'react-native-safe-area-context';
 
 const LOGO = {
   light: require('@/assets/images/react-native-reusables-light.png'),
@@ -28,6 +33,7 @@ const LOGO_STYLE: ImageStyle = {
 
 const SCREEN_OPTIONS = {
   header: () => (
+    <SafeAreaView>
     <View className="top-safe absolute left-0 right-0 flex-row justify-between px-4 py-2 web:mx-2">
       <DrawerToggle />
       <Text className=''>Pramana AI</Text>
@@ -36,6 +42,7 @@ const SCREEN_OPTIONS = {
         <UserMenu />
       </View>
     </View>
+    </SafeAreaView>
   ),
 };
 

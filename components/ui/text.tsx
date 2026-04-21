@@ -1,8 +1,9 @@
 import { cn } from '@/lib/utils';
+import { FONTS, FONT_VARIANTS } from '@/lib/theme';
 import * as Slot from '@rn-primitives/slot';
 import { cva, type VariantProps } from 'class-variance-authority';
 import * as React from 'react';
-import { Platform, Text as RNText, type Role } from 'react-native';
+import { Platform, Text as RNText, type Role, StyleSheet } from 'react-native';
 
 const textVariants = cva(
   cn(
@@ -62,12 +63,19 @@ const ARIA_LEVEL: Partial<Record<TextVariant, string>> = {
   h4: '4',
 };
 
+// Get font family for text variant
+const getFontFamily = (variant: TextVariant): string => {
+  const fontKey = FONT_VARIANTS[variant] || 'regular';
+  return FONTS[fontKey];
+};
+
 const TextClassContext = React.createContext<string | undefined>(undefined);
 
 function Text({
   className,
   asChild = false,
   variant = 'default',
+  style,
   ...props
 }: React.ComponentProps<typeof RNText> &
   TextVariantProps &
@@ -76,9 +84,16 @@ function Text({
   }) {
   const textClass = React.useContext(TextClassContext);
   const Component = asChild ? Slot.Text : RNText;
+  const fontFamily = getFontFamily(variant);
+  const computedStyle = React.useMemo(() => {
+    const baseStyle = [{ fontFamily }, style];
+    return baseStyle;
+  }, [fontFamily, style]);
+
   return (
     <Component
       className={cn(textVariants({ variant }), textClass, className)}
+      style={computedStyle}
       role={variant ? ROLE[variant] : undefined}
       aria-level={variant ? ARIA_LEVEL[variant] : undefined}
       {...props}
